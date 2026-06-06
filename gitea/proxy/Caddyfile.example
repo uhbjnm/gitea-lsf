@@ -1,0 +1,6 @@
+git.example.com {
+    @lfs path_regexp lfs ^/[^/]+/[^/]+(\.git)?/info/lfs/.*
+    reverse_proxy @lfs lfs-gateway:8080
+
+    reverse_proxy gitea:3000
+}

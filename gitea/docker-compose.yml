@@ -1,0 +1,123 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: gitea-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      TZ: Asia/Shanghai
+    volumes:
+      - ./postgres-data:/var/lib/postgresql/data
+    networks:
+      - gitea-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  gitea:
+    image: gitea/gitea:latest
+    container_name: gitea
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      USER_UID: ${USER_UID}
+      USER_GID: ${USER_GID}
+
+      # 数据库
+      GITEA__database__DB_TYPE: ${GITEA_DB_TYPE}
+      GITEA__database__HOST: ${GITEA_DB_HOST}
+      GITEA__database__NAME: ${GITEA_DB_NAME}
+      GITEA__database__USER: ${GITEA_DB_USER}
+      GITEA__database__PASSWD: ${GITEA_DB_PASSWD}
+
+      # 首次启动时跳过安装页并自动迁移数据库
+      GITEA__security__INSTALL_LOCK: true
+      GITEA__security__SECRET_KEY: ${GITEA_SECRET_KEY}
+
+      # 基础服务配置
+      GITEA__server__DOMAIN: ${GITEA_DOMAIN}
+      GITEA__server__ROOT_URL: ${GITEA_ROOT_URL}
+      GITEA__server__HTTP_PORT: 3000
+      GITEA__server__DISABLE_SSH: false
+      GITEA__server__SSH_DOMAIN: ${GITEA_SSH_DOMAIN}
+      GITEA__server__SSH_PORT: ${GITEA_SSH_PORT}
+      GITEA__server__START_SSH_SERVER: false
+      # Web UI needs this to recognize LFS pointers; Git LFS API traffic is still routed to lfs-gateway by proxy.
+      GITEA__server__LFS_START_SERVER: true
+
+      # 安全建议
+      GITEA__service__DISABLE_REGISTRATION: false
+      GITEA__service__REQUIRE_SIGNIN_VIEW: true
+
+      # 上传大小限制，按需调整
+      GITEA__repository__MAX_CREATION_LIMIT: -1
+      GITEA__attachment__MAX_SIZE: 5120
+      GITEA__attachment__MAX_FILES: 200
+
+      # 时区
+      TZ: Asia/Shanghai
+
+    volumes:
+      - ./gitea-data:/data
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+
+    ports:
+      - "${GITEA_HTTP_PORT}:3000"
+      - "${GITEA_SSH_PORT}:22"
+
+    networks:
+      - gitea-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/ >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 20s
+
+  lfs-gateway:
+    build:
+      context: ../lfs-gateway
+    container_name: gitea-lfs-gateway
+    restart: always
+    depends_on:
+      gitea:
+        condition: service_healthy
+    environment:
+      LFS_GATEWAY_ADDR: :8080
+      GITEA_API_URL: http://gitea:3000/api/v1
+      LFS_PUBLIC_URL: ${LFS_PUBLIC_URL}
+      LFS_SIGN_EXPIRES: ${LFS_SIGN_EXPIRES}
+      LFS_VERIFY_SECRET: ${LFS_VERIFY_SECRET}
+      LFS_META_DB_DRIVER: ${LFS_META_DB_DRIVER}
+      LFS_META_DB_DSN: ${LFS_META_DB_DSN}
+      OSS_ENDPOINT: ${OSS_ENDPOINT}
+      OSS_BUCKET: ${OSS_BUCKET}
+      OSS_ACCESS_KEY_ID: ${ALIYUN_OSS_ACCESS_KEY_ID}
+      OSS_ACCESS_KEY_SECRET: ${ALIYUN_OSS_ACCESS_KEY_SECRET}
+      OSS_KEY_PREFIX: ${OSS_KEY_PREFIX}
+      OSS_KEY_STYLE: ${OSS_KEY_STYLE}
+      CDN_BASE_URL: ${CDN_BASE_URL}
+      CDN_AUTH_KEY: ${CDN_AUTH_KEY}
+      CDN_AUTH_UID: ${CDN_AUTH_UID}
+      TZ: Asia/Shanghai
+    ports:
+      - "${LFS_GATEWAY_PORT}:8080"
+    networks:
+      - gitea-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+networks:
+  gitea-net:
+    external: true

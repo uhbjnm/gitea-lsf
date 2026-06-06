@@ -1,0 +1,7 @@
+gitea/env
+gitea/gitea-data/
+gitea/postgres-data/
+lfs-gateway/dist/
+*.exe
+*.test
+coverage.out

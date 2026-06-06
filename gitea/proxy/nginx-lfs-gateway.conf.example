@@ -1,0 +1,40 @@
+# Put this server block behind your TLS certificate configuration.
+# It routes Git LFS API and Gitea Web LFS media downloads to lfs-gateway.
+# Normal Gitea traffic stays on Gitea.
+
+server {
+    listen 80;
+    server_name git.example.com;
+
+    location ~ ^/[^/]+/[^/]+(\.git)?/info/lfs/ {
+        proxy_pass http://lfs-gateway:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        client_max_body_size 0;
+        proxy_request_buffering off;
+    }
+
+    location ~ ^/[^/]+/[^/]+/media/ {
+        proxy_pass http://lfs-gateway:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Cookie $http_cookie;
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location / {
+        proxy_pass http://gitea:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
