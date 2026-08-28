@@ -205,7 +205,7 @@ Gateway 在 OSS finalize 时给正式对象写入标准 `Content-Disposition`，
 
 ## AI Agent 发布 Release
 
-为 Agent 创建专用 Gitea 用户并授予目标仓库写权限，Access Token 至少需要 `read:user,write:repository` scope。Gateway 使用 `read:user` 获取可信 uploader ID，使用 `write:repository` 校验仓库和 Release。Token 只能通过环境变量或 Secret Store 注入。
+为 Agent 创建专用 Gitea 用户并授予目标仓库写权限，Access Token 只需要 `write:repository` scope。Gateway 从目标 Release 的 `author.id` 获取可信 uploader ID，不需要 `read:user`。Token 只能通过环境变量或 Secret Store 注入。
 
 ```bash
 export GITEA_URL="https://git.example.com"

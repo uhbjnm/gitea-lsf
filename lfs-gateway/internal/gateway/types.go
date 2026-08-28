@@ -114,10 +114,9 @@ type releaseAttachment struct {
 	CreatedAt  time.Time
 }
 
-type userInfo struct {
-	ID int64 `json:"id"`
-}
-
 type releaseInfo struct {
-	ID int64 `json:"id"`
+	ID     int64 `json:"id"`
+	Author struct {
+		ID int64 `json:"id"`
+	} `json:"author"`
 }

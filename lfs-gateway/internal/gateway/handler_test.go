@@ -32,12 +32,11 @@ func (c fakeRepoClient) GetRepo(_ context.Context, _ string, _ string, _ string)
 	return c.info, c.err
 }
 
-func (c fakeRepoClient) GetCurrentUser(_ context.Context, _ string) (userInfo, error) {
-	return userInfo{ID: 7}, c.err
-}
-
-func (c fakeRepoClient) GetRelease(_ context.Context, _ string, _ string, _ string, _ int64) error {
-	return c.releaseErr
+func (c fakeRepoClient) GetRelease(_ context.Context, _ string, _ string, _ string, releaseID int64) (releaseInfo, error) {
+	var release releaseInfo
+	release.ID = releaseID
+	release.Author.ID = 7
+	return release, c.releaseErr
 }
 
 func (c fakeRepoClient) CheckReleaseWriter(_ context.Context, _ http.Header, _ string, _ string) (string, error) {
