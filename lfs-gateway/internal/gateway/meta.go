@@ -105,10 +105,11 @@ func (s *PostgresMetaStore) EnsureAttachment(ctx context.Context, attachment rel
 		ctx,
 		`INSERT INTO attachment
 		 (uuid, repo_id, issue_id, release_id, uploader_id, comment_id, name, download_count, size, created_unix)
-		 VALUES ($1, $2, 0, 0, $3, 0, $4, 0, $5, $6)
+		 VALUES ($1, $2, 0, $3, $4, 0, $5, 0, $6, $7)
 		 ON CONFLICT (uuid) DO NOTHING`,
 		attachment.UUID,
 		attachment.RepoID,
+		attachment.ReleaseID,
 		attachment.UploaderID,
 		attachment.Name,
 		attachment.Size,
@@ -121,12 +122,13 @@ func (s *PostgresMetaStore) EnsureAttachment(ctx context.Context, attachment rel
 	var stored releaseAttachment
 	err = s.db.QueryRowContext(
 		ctx,
-		`SELECT uuid, repo_id, uploader_id, name, size, created_unix
+		`SELECT uuid, repo_id, release_id, uploader_id, name, size, created_unix
 		 FROM attachment WHERE uuid = $1`,
 		attachment.UUID,
 	).Scan(
 		&stored.UUID,
 		&stored.RepoID,
+		&stored.ReleaseID,
 		&stored.UploaderID,
 		&stored.Name,
 		&stored.Size,
@@ -135,7 +137,7 @@ func (s *PostgresMetaStore) EnsureAttachment(ctx context.Context, attachment rel
 	if err != nil {
 		return fmt.Errorf("load release attachment: %w", err)
 	}
-	if stored.UUID != attachment.UUID || stored.RepoID != attachment.RepoID ||
+	if stored.UUID != attachment.UUID || stored.RepoID != attachment.RepoID || stored.ReleaseID != attachment.ReleaseID ||
 		stored.UploaderID != attachment.UploaderID || stored.Name != attachment.Name || stored.Size != attachment.Size {
 		return errors.New("release attachment UUID already belongs to different metadata")
 	}

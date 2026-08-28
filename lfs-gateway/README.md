@@ -21,6 +21,8 @@
 - `GET|HEAD /{owner}/{repo}/releases/download/{tag}/{filename}`，鉴权后跳转到 CDN。
 - `GET /healthz`
 
+直传接口支持两种身份：浏览器 Session Cookie 不传 `release_id`，生成未绑定附件供 Gitea 表单使用；API token 必须传 `release_id`，Gateway 会通过 Gitea API 校验 token 用户、仓库写权限和 Release 归属，完成后直接绑定附件。
+
 未实现：
 
 - LFS Locks API 的创建、查询、解锁。普通 `git lfs push/pull` 不依赖这些接口；如果你的仓库使用 `git lfs lock`，需要后续补完整锁接口。

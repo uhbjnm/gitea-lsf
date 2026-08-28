@@ -19,6 +19,8 @@ var uuidPattern = regexp.MustCompile(`\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89
 
 type repoClient interface {
 	GetRepo(ctx context.Context, auth, owner, repo string) (repoInfo, error)
+	GetCurrentUser(ctx context.Context, auth string) (userInfo, error)
+	GetRelease(ctx context.Context, auth, owner, repo string, releaseID int64) error
 	CheckReleaseWriter(ctx context.Context, headers http.Header, owner, repo string) (string, error)
 	GetMedia(ctx context.Context, headers http.Header, path string) (*mediaResponse, error)
 	GetWeb(ctx context.Context, method string, headers http.Header, path string) (*mediaResponse, error)
@@ -101,16 +103,28 @@ func (h *Handler) handleReleaseUpload(w http.ResponseWriter, r *http.Request, ro
 		writeAPIError(w, http.StatusUnsupportedMediaType, "application/json is required")
 		return
 	}
-	repoID, uploaderID, ok := h.authorizeReleaseWriter(w, r, route)
-	if !ok {
-		return
-	}
-
 	var req releaseUploadRequest
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&req); err != nil {
 		writeAPIError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	repoID, uploaderID, agent, ok := h.authorizeReleaseWriter(w, r, route)
+	if !ok {
+		return
+	}
+	if agent {
+		if req.ReleaseID <= 0 {
+			writeAPIError(w, http.StatusUnprocessableEntity, "release_id is required for token upload")
+			return
+		}
+		if err := h.repos.GetRelease(r.Context(), r.Header.Get("Authorization"), route.Owner, route.Repo, req.ReleaseID); err != nil {
+			writeReleaseAuthorizationError(w, err)
+			return
+		}
+	} else if req.ReleaseID != 0 {
+		writeAPIError(w, http.StatusUnprocessableEntity, "release_id is only allowed for token upload")
 		return
 	}
 	name := sanitizeFilename(req.Name)
@@ -130,7 +144,8 @@ func (h *Handler) handleReleaseUpload(w http.ResponseWriter, r *http.Request, ro
 	}
 	expiresAt := time.Now().UTC().Add(h.cfg.SignExpires).Truncate(time.Second)
 	claims := releaseUploadClaims{
-		RepoID: repoID, UploaderID: uploaderID, UUID: uuid, Name: name, Size: req.Size, ExpiresAt: expiresAt.Unix(),
+		RepoID: repoID, ReleaseID: req.ReleaseID, UploaderID: uploaderID,
+		UUID: uuid, Name: name, Size: req.Size, ExpiresAt: expiresAt.Unix(),
 	}
 	token, err := h.releaseTokens.Sign(claims)
 	if err != nil {
@@ -162,7 +177,7 @@ func (h *Handler) handleReleaseUploadComplete(w http.ResponseWriter, r *http.Req
 		writeAPIError(w, http.StatusUnsupportedMediaType, "application/json is required")
 		return
 	}
-	repoID, uploaderID, ok := h.authorizeReleaseWriter(w, r, route)
+	repoID, uploaderID, agent, ok := h.authorizeReleaseWriter(w, r, route)
 	if !ok {
 		return
 	}
@@ -175,9 +190,15 @@ func (h *Handler) handleReleaseUploadComplete(w http.ResponseWriter, r *http.Req
 		return
 	}
 	claims, valid := h.releaseTokens.Verify(req.Token, time.Now())
-	if !valid || claims.RepoID != repoID || claims.UploaderID != uploaderID {
+	if !valid || claims.RepoID != repoID || claims.UploaderID != uploaderID || (claims.ReleaseID > 0) != agent {
 		writeAPIError(w, http.StatusUnauthorized, "invalid upload token")
 		return
+	}
+	if claims.ReleaseID > 0 {
+		if err := h.repos.GetRelease(r.Context(), r.Header.Get("Authorization"), route.Owner, route.Repo, claims.ReleaseID); err != nil {
+			writeReleaseAuthorizationError(w, err)
+			return
+		}
 	}
 
 	pendingKey := releasePendingKey(h.cfg.ReleasePendingPrefix, repoID, claims.UUID)
@@ -214,7 +235,7 @@ func (h *Handler) handleReleaseUploadComplete(w http.ResponseWriter, r *http.Req
 	}
 
 	attachment := releaseAttachment{
-		UUID: claims.UUID, RepoID: claims.RepoID, UploaderID: claims.UploaderID,
+		UUID: claims.UUID, RepoID: claims.RepoID, ReleaseID: claims.ReleaseID, UploaderID: claims.UploaderID,
 		Name: claims.Name, Size: claims.Size, CreatedAt: time.Now().UTC(),
 	}
 	if err := h.metas.EnsureAttachment(r.Context(), attachment); err != nil {
@@ -601,18 +622,37 @@ func (h *Handler) authorize(w http.ResponseWriter, r *http.Request, route route,
 	return repo, true
 }
 
-func (h *Handler) authorizeReleaseWriter(w http.ResponseWriter, r *http.Request, route route) (int64, int64, bool) {
+func (h *Handler) authorizeReleaseWriter(w http.ResponseWriter, r *http.Request, route route) (int64, int64, bool, bool) {
+	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+	if auth != "" {
+		repo, err := h.repos.GetRepo(r.Context(), auth, route.Owner, route.Repo)
+		if err != nil {
+			writeReleaseAuthorizationError(w, err)
+			return 0, 0, true, false
+		}
+		if !repo.canPush() {
+			writeAPIError(w, http.StatusForbidden, "release write permission required")
+			return 0, 0, true, false
+		}
+		user, err := h.repos.GetCurrentUser(r.Context(), auth)
+		if err != nil {
+			writeReleaseAuthorizationError(w, err)
+			return 0, 0, true, false
+		}
+		return repo.ID, user.ID, true, true
+	}
+
 	username, err := h.repos.CheckReleaseWriter(r.Context(), r.Header, route.Owner, route.Repo)
 	if err != nil {
 		writeReleaseAuthorizationError(w, err)
-		return 0, 0, false
+		return 0, 0, false, false
 	}
 	repoID, uploaderID, err := h.metas.ResolveReleaseUpload(r.Context(), route.Owner, route.Repo, username)
 	if err != nil {
 		writeReleaseAuthorizationError(w, err)
-		return 0, 0, false
+		return 0, 0, false, false
 	}
-	return repoID, uploaderID, true
+	return repoID, uploaderID, false, true
 }
 
 func writeReleaseAuthorizationError(w http.ResponseWriter, err error) {

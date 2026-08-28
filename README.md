@@ -202,3 +202,25 @@ Gateway 在 OSS finalize 时给正式对象写入标准 `Content-Disposition`，
 ```
 
 因此 Release 下载不需要额外的 CDN Path 重写，浏览器从响应头获得原文件名。历史迁移对象没有该元数据时，Gateway 会在首次下载前自动补齐。
+
+## AI Agent 发布 Release
+
+为 Agent 创建专用 Gitea 用户并授予目标仓库写权限，Access Token 至少需要 `read:user,write:repository` scope。Gateway 使用 `read:user` 获取可信 uploader ID，使用 `write:repository` 校验仓库和 Release。Token 只能通过环境变量或 Secret Store 注入。
+
+```bash
+export GITEA_URL="https://git.example.com"
+export GITEA_TOKEN="..."
+
+python lfs-gateway/scripts/publish_release_direct.py \
+  --owner owner \
+  --repo repo \
+  --tag v1.2.3 \
+  --target main \
+  --title "v1.2.3" \
+  --notes "Release notes" \
+  ./dist/app.zip ./dist/app.sha256
+```
+
+脚本仅使用 Python 标准库，大文件按 1 MiB 分块流式上传，不会整体读入内存。它先通过 Gitea API 创建 draft Release，再调用 Gateway 获取 OSS 预签名 URL，文件直传 OSS。所有附件完成并通过 Gitea API 校验后，脚本才把 draft 发布为正式 Release。中途失败时 Release 保持 draft，不会发布附件不完整的版本。
+
+Agent 模式必须在直传请求中传入 Gitea 返回的 `release_id`；网页 Cookie 模式不传该字段，两种流程共用相同 endpoint 且互不混用。不要调用 Gitea 标准 `POST /api/v1/repos/{owner}/{repo}/releases/{id}/assets`，该接口会让文件内容经过 Gitea服务器。

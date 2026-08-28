@@ -20,6 +20,7 @@ const testOID = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde
 type fakeRepoClient struct {
 	info             repoInfo
 	err              error
+	releaseErr       error
 	releaseWriterErr error
 	mediaRedirect    *url.URL
 	mediaStatus      int
@@ -29,6 +30,14 @@ type fakeRepoClient struct {
 
 func (c fakeRepoClient) GetRepo(_ context.Context, _ string, _ string, _ string) (repoInfo, error) {
 	return c.info, c.err
+}
+
+func (c fakeRepoClient) GetCurrentUser(_ context.Context, _ string) (userInfo, error) {
+	return userInfo{ID: 7}, c.err
+}
+
+func (c fakeRepoClient) GetRelease(_ context.Context, _ string, _ string, _ string, _ int64) error {
+	return c.releaseErr
 }
 
 func (c fakeRepoClient) CheckReleaseWriter(_ context.Context, _ http.Header, _ string, _ string) (string, error) {
@@ -90,7 +99,8 @@ func (s fakeStore) EnsureDownloadName(_ context.Context, _ string, _ string) err
 }
 
 type fakeMetaStore struct {
-	objects map[string]objectMeta
+	objects     map[string]objectMeta
+	attachments map[string]releaseAttachment
 }
 
 func (s fakeMetaStore) Get(_ context.Context, repoID int64, oid string) (objectMeta, bool, error) {
@@ -105,6 +115,9 @@ func (s fakeMetaStore) Upsert(_ context.Context, repoID int64, obj objectRequest
 
 func (s fakeMetaStore) EnsureAttachment(_ context.Context, attachment releaseAttachment) error {
 	s.objects["attachment:"+attachment.UUID] = objectMeta{Size: attachment.Size}
+	if s.attachments != nil {
+		s.attachments[attachment.UUID] = attachment
+	}
 	return nil
 }
 
@@ -418,6 +431,82 @@ func TestReleaseUploadGoesDirectToOSSAndCreatesTemporaryAttachment(t *testing.T)
 	}
 	if meta, ok := metas.objects["attachment:"+uuid]; !ok || meta.Size != 12 {
 		t.Fatalf("attachment metadata = %+v, exists = %v", meta, ok)
+	}
+}
+
+func TestReleaseTokenUploadBindsAttachmentToRelease(t *testing.T) {
+	cfg := testConfig()
+	cfg.ReleaseDirectUpload = true
+	store := fakeStore{objects: map[string]objectMeta{}}
+	attachments := map[string]releaseAttachment{}
+	metas := fakeMetaStore{objects: map[string]objectMeta{}, attachments: attachments}
+	handler := NewHandler(
+		cfg,
+		fakeRepoClient{info: repoWithPermissions(true, true)},
+		store,
+		NewDownloadSigner(cfg, store),
+		metas,
+		NewVerifyTokens(cfg.VerifySecret),
+	)
+
+	initReq := httptest.NewRequest(http.MethodPost, "/acme/demo/releases/attachments/direct", strings.NewReader(`{"release_id":99,"name":"agent.zip","size":12}`))
+	initReq.Header.Set("Content-Type", "application/json")
+	initReq.Header.Set("Authorization", "token test")
+	initResp := httptest.NewRecorder()
+	handler.ServeHTTP(initResp, initReq)
+	if initResp.Code != http.StatusOK {
+		t.Fatalf("init status = %d, body = %s", initResp.Code, initResp.Body.String())
+	}
+	var upload releaseUploadResponse
+	if err := json.NewDecoder(initResp.Body).Decode(&upload); err != nil {
+		t.Fatal(err)
+	}
+	claims, ok := NewReleaseUploadTokens(cfg.VerifySecret).Verify(upload.Token, time.Now())
+	if !ok || claims.ReleaseID != 99 {
+		t.Fatalf("claims = %+v, valid = %v", claims, ok)
+	}
+	uploadURL, err := url.Parse(upload.Upload.Href)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingKey, err := url.PathUnescape(strings.TrimPrefix(uploadURL.EscapedPath(), "/"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.objects[pendingKey] = objectMeta{Size: 12}
+
+	completeReq := httptest.NewRequest(http.MethodPost, upload.CompleteURL, strings.NewReader(`{"token":"`+upload.Token+`"}`))
+	completeReq.Header.Set("Content-Type", "application/json")
+	completeReq.Header.Set("Authorization", "token test")
+	completeResp := httptest.NewRecorder()
+	handler.ServeHTTP(completeResp, completeReq)
+	if completeResp.Code != http.StatusOK {
+		t.Fatalf("complete status = %d, body = %s", completeResp.Code, completeResp.Body.String())
+	}
+	attachment, ok := attachments[claims.UUID]
+	if !ok || attachment.ReleaseID != 99 {
+		t.Fatalf("attachment = %+v, exists = %v", attachment, ok)
+	}
+}
+
+func TestReleaseTokenUploadRequiresReleaseID(t *testing.T) {
+	cfg := testConfig()
+	cfg.ReleaseDirectUpload = true
+	handler := NewHandler(
+		cfg,
+		fakeRepoClient{info: repoWithPermissions(true, true)},
+		fakeStore{objects: map[string]objectMeta{}},
+		NewDownloadSigner(cfg, fakeStore{objects: map[string]objectMeta{}}),
+		fakeMetaStore{objects: map[string]objectMeta{}},
+		NewVerifyTokens(cfg.VerifySecret),
+	)
+	req := httptest.NewRequest(http.MethodPost, "/acme/demo/releases/attachments/direct", strings.NewReader(`{"name":"agent.zip","size":12}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "token test")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
 	}
 }
 

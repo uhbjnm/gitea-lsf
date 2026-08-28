@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"time"
 )
 
@@ -25,6 +26,81 @@ type GiteaClient struct {
 	apiURL string
 	webURL string
 	client *http.Client
+}
+
+func (c *GiteaClient) GetCurrentUser(ctx context.Context, auth string) (userInfo, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.apiURL+"/user", nil)
+	if err != nil {
+		return userInfo{}, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", auth)
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return userInfo{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, resp.Body)
+		switch resp.StatusCode {
+		case http.StatusUnauthorized:
+			return userInfo{}, errUnauthorized
+		case http.StatusForbidden:
+			return userInfo{}, errForbidden
+		default:
+			return userInfo{}, fmt.Errorf("gitea user api: %s", resp.Status)
+		}
+	}
+	var user userInfo
+	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
+		return userInfo{}, err
+	}
+	if user.ID <= 0 {
+		return userInfo{}, errors.New("gitea user response missing id")
+	}
+	return user, nil
+}
+
+func (c *GiteaClient) GetRelease(ctx context.Context, auth, owner, repo string, releaseID int64) error {
+	endpoint := fmt.Sprintf(
+		"%s/repos/%s/%s/releases/%s",
+		c.apiURL,
+		url.PathEscape(owner),
+		url.PathEscape(repo),
+		strconv.FormatInt(releaseID, 10),
+	)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", auth)
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, resp.Body)
+		switch resp.StatusCode {
+		case http.StatusUnauthorized:
+			return errUnauthorized
+		case http.StatusForbidden:
+			return errForbidden
+		case http.StatusNotFound:
+			return errNotFound
+		default:
+			return fmt.Errorf("gitea release api: %s", resp.Status)
+		}
+	}
+	var release releaseInfo
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return err
+	}
+	if release.ID != releaseID {
+		return errors.New("gitea release response id mismatch")
+	}
+	return nil
 }
 
 type mediaResponse struct {

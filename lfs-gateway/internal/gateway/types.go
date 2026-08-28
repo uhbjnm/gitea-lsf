@@ -88,8 +88,9 @@ type objectMeta struct {
 }
 
 type releaseUploadRequest struct {
-	Name string `json:"name"`
-	Size int64  `json:"size"`
+	ReleaseID int64  `json:"release_id,omitempty"`
+	Name      string `json:"name"`
+	Size      int64  `json:"size"`
 }
 
 type releaseUploadCompleteRequest struct {
@@ -106,8 +107,17 @@ type releaseUploadResponse struct {
 type releaseAttachment struct {
 	UUID       string
 	RepoID     int64
+	ReleaseID  int64
 	UploaderID int64
 	Name       string
 	Size       int64
 	CreatedAt  time.Time
+}
+
+type userInfo struct {
+	ID int64 `json:"id"`
+}
+
+type releaseInfo struct {
+	ID int64 `json:"id"`
 }

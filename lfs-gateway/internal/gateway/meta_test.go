@@ -41,16 +41,16 @@ func TestPostgresMetaStoreEnsureAttachment(t *testing.T) {
 	defer db.Close()
 
 	attachment := releaseAttachment{
-		UUID: "01234567-89ab-4def-8123-456789abcdef", RepoID: 42, UploaderID: 7,
+		UUID: "01234567-89ab-4def-8123-456789abcdef", RepoID: 42, ReleaseID: 99, UploaderID: 7,
 		Name: "setup.zip", Size: 12, CreatedAt: time.Unix(100, 0),
 	}
 	mock.ExpectExec("INSERT INTO attachment").
-		WithArgs(attachment.UUID, attachment.RepoID, attachment.UploaderID, attachment.Name, attachment.Size, int64(100)).
+		WithArgs(attachment.UUID, attachment.RepoID, attachment.ReleaseID, attachment.UploaderID, attachment.Name, attachment.Size, int64(100)).
 		WillReturnResult(sqlmock.NewResult(1, 1))
-	mock.ExpectQuery("SELECT uuid, repo_id, uploader_id, name, size, created_unix").
+	mock.ExpectQuery("SELECT uuid, repo_id, release_id, uploader_id, name, size, created_unix").
 		WithArgs(attachment.UUID).
-		WillReturnRows(sqlmock.NewRows([]string{"uuid", "repo_id", "uploader_id", "name", "size", "created_unix"}).
-			AddRow(attachment.UUID, attachment.RepoID, attachment.UploaderID, attachment.Name, attachment.Size, int64(100)))
+		WillReturnRows(sqlmock.NewRows([]string{"uuid", "repo_id", "release_id", "uploader_id", "name", "size", "created_unix"}).
+			AddRow(attachment.UUID, attachment.RepoID, attachment.ReleaseID, attachment.UploaderID, attachment.Name, attachment.Size, int64(100)))
 
 	store := &PostgresMetaStore{db: db}
 	if err := store.EnsureAttachment(context.Background(), attachment); err != nil {

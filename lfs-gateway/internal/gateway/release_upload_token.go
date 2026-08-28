@@ -13,6 +13,7 @@ import (
 
 type releaseUploadClaims struct {
 	RepoID     int64  `json:"repo_id"`
+	ReleaseID  int64  `json:"release_id,omitempty"`
 	UploaderID int64  `json:"uploader_id"`
 	UUID       string `json:"uuid"`
 	Name       string `json:"name"`
@@ -61,7 +62,7 @@ func (t *ReleaseUploadTokens) Verify(token string, now time.Time) (releaseUpload
 	if err := json.Unmarshal(payload, &claims); err != nil || claims.ExpiresAt <= now.Unix() {
 		return releaseUploadClaims{}, false
 	}
-	if claims.RepoID <= 0 || claims.UploaderID <= 0 || claims.Size < 0 ||
+	if claims.RepoID <= 0 || claims.ReleaseID < 0 || claims.UploaderID <= 0 || claims.Size < 0 ||
 		!uuidPattern.MatchString(claims.UUID) || claims.Name == "" {
 		return releaseUploadClaims{}, false
 	}
