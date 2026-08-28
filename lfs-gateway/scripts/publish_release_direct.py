@@ -109,6 +109,12 @@ def main():
     owner = urllib.parse.quote(args.owner, safe="")
     repo = urllib.parse.quote(args.repo, safe="")
     api_base = f"/api/v1/repos/{owner}/{repo}"
+    api_request(base_url, token, "GET", "/api/v1/user")
+    repository = api_request(base_url, token, "GET", api_base)
+    permissions = repository.get("permissions") or {}
+    if not (permissions.get("push") or permissions.get("admin")):
+        raise RuntimeError("GITEA_TOKEN does not have write permission for the repository")
+
     release = api_request(
         base_url,
         token,
