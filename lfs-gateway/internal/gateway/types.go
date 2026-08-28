@@ -86,3 +86,28 @@ func (r repoInfo) canPush() bool {
 type objectMeta struct {
 	Size int64
 }
+
+type releaseUploadRequest struct {
+	Name string `json:"name"`
+	Size int64  `json:"size"`
+}
+
+type releaseUploadCompleteRequest struct {
+	Token string `json:"token"`
+}
+
+type releaseUploadResponse struct {
+	Upload      lfsLink   `json:"upload"`
+	CompleteURL string    `json:"complete_url"`
+	Token       string    `json:"token"`
+	ExpiresAt   time.Time `json:"expires_at"`
+}
+
+type releaseAttachment struct {
+	UUID       string
+	RepoID     int64
+	UploaderID int64
+	Name       string
+	Size       int64
+	CreatedAt  time.Time
+}

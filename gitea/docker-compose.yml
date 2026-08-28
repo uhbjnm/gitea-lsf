@@ -19,7 +19,7 @@ services:
       retries: 12
 
   gitea:
-    image: gitea/gitea:latest
+    image: gitea/gitea:1.26.2
     container_name: gitea
     restart: always
     depends_on:
@@ -60,11 +60,27 @@ services:
       GITEA__attachment__MAX_SIZE: 5120
       GITEA__attachment__MAX_FILES: 200
 
+      # Release attachments are stored in OSS. The browser upload data is sent directly through lfs-gateway presigned URLs.
+      MINIO_ACCESS_KEY: ${ALIYUN_OSS_ACCESS_KEY_ID}
+      MINIO_SECRET_KEY: ${ALIYUN_OSS_ACCESS_KEY_SECRET}
+      GITEA__attachment__STORAGE_TYPE: minio
+      GITEA__attachment__SERVE_DIRECT: true
+      GITEA__attachment__MINIO_ENDPOINT: ${GITEA_ATTACHMENT_OSS_ENDPOINT}
+      GITEA__attachment__MINIO_BUCKET: ${OSS_BUCKET}
+      GITEA__attachment__MINIO_LOCATION: ${GITEA_ATTACHMENT_OSS_LOCATION}
+      GITEA__attachment__MINIO_BASE_PATH: ${RELEASE_ATTACHMENT_OSS_PREFIX}/
+      GITEA__attachment__MINIO_USE_SSL: true
+      GITEA__attachment__MINIO_BUCKET_LOOKUP_TYPE: dns
+      GITEA__repository_0x2E_release__FILE_MAX_SIZE: ${RELEASE_MAX_FILE_SIZE_MB}
+      GITEA__repository_0x2E_release__MAX_FILES: ${RELEASE_MAX_FILES}
+
       # 时区
       TZ: Asia/Shanghai
 
     volumes:
       - ./gitea-data:/data
+      - ./custom/templates/custom/footer.tmpl:/data/gitea/templates/custom/footer.tmpl:ro
+      - ./custom/public/assets/js/release-direct-upload.js:/data/gitea/public/assets/js/release-direct-upload.js:ro
       - /etc/timezone:/etc/timezone:ro
       - /etc/localtime:/etc/localtime:ro
 
@@ -106,6 +122,10 @@ services:
       CDN_BASE_URL: ${CDN_BASE_URL}
       CDN_AUTH_KEY: ${CDN_AUTH_KEY}
       CDN_AUTH_UID: ${CDN_AUTH_UID}
+      RELEASE_DIRECT_UPLOAD: ${RELEASE_DIRECT_UPLOAD}
+      RELEASE_ATTACHMENT_OSS_PREFIX: ${RELEASE_ATTACHMENT_OSS_PREFIX}
+      RELEASE_PENDING_OSS_PREFIX: ${RELEASE_PENDING_OSS_PREFIX}
+      RELEASE_MAX_FILE_SIZE_MB: ${RELEASE_MAX_FILE_SIZE_MB}
       TZ: Asia/Shanghai
     ports:
       - "${LFS_GATEWAY_PORT}:8080"

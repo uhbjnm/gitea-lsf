@@ -4,6 +4,7 @@ import (
 	"context"
 	"regexp"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 )
@@ -26,6 +27,58 @@ func TestPostgresMetaStoreGet(t *testing.T) {
 	}
 	if !ok || meta.Size != 12 {
 		t.Fatalf("meta = %+v, ok = %v", meta, ok)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPostgresMetaStoreEnsureAttachment(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	attachment := releaseAttachment{
+		UUID: "01234567-89ab-4def-8123-456789abcdef", RepoID: 42, UploaderID: 7,
+		Name: "setup.zip", Size: 12, CreatedAt: time.Unix(100, 0),
+	}
+	mock.ExpectExec("INSERT INTO attachment").
+		WithArgs(attachment.UUID, attachment.RepoID, attachment.UploaderID, attachment.Name, attachment.Size, int64(100)).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectQuery("SELECT uuid, repo_id, uploader_id, name, size, created_unix").
+		WithArgs(attachment.UUID).
+		WillReturnRows(sqlmock.NewRows([]string{"uuid", "repo_id", "uploader_id", "name", "size", "created_unix"}).
+			AddRow(attachment.UUID, attachment.RepoID, attachment.UploaderID, attachment.Name, attachment.Size, int64(100)))
+
+	store := &PostgresMetaStore{db: db}
+	if err := store.EnsureAttachment(context.Background(), attachment); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPostgresMetaStoreResolveReleaseUpload(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	mock.ExpectQuery("SELECT repository.id, uploader.id").
+		WithArgs("owner", "repo", "release-user").
+		WillReturnRows(sqlmock.NewRows([]string{"repo_id", "uploader_id"}).AddRow(int64(42), int64(7)))
+
+	store := &PostgresMetaStore{db: db}
+	repoID, uploaderID, err := store.ResolveReleaseUpload(context.Background(), "owner", "repo", "release-user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repoID != 42 || uploaderID != 7 {
+		t.Fatalf("repoID = %d, uploaderID = %d", repoID, uploaderID)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

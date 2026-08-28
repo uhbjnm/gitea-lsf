@@ -16,6 +16,9 @@
 - `POST /{owner}/{repo}.git/info/lfs/objects/{oid}/verify`
 - `POST /{owner}/{repo}.git/info/lfs/locks/verify`，返回空锁集合，用于兼容 Git LFS 客户端的锁探测。
 - `GET /{owner}/{repo}/media/{branch|commit|tag}/...`，用于 Gitea Web 页面下载 LFS 文件时跳转到带原始文件名的 CDN 鉴权 URL。
+- `POST /{owner}/{repo}/releases/attachments/direct`，为 Gitea Release 页面签发 OSS 直传 URL。
+- `POST /{owner}/{repo}/releases/attachments/direct/complete`，校验并登记直传附件。
+- `GET|HEAD /{owner}/{repo}/releases/download/{tag}/{filename}`，鉴权后跳转到 CDN。
 - `GET /healthz`
 
 未实现：
@@ -43,6 +46,11 @@ CDN_AUTH_UID=0
 
 LFS_VERIFY_SECRET=replace-with-a-long-random-secret
 LFS_SIGN_EXPIRES=30m
+
+RELEASE_DIRECT_UPLOAD=true
+RELEASE_ATTACHMENT_OSS_PREFIX=gitea/attachments
+RELEASE_PENDING_OSS_PREFIX=gitea/release-upload-pending
+RELEASE_MAX_FILE_SIZE_MB=5120
 ```
 
 OSS AccessKey 不建议写入 `gitea/env`。Compose 已配置为从宿主机环境变量透传：
@@ -57,6 +65,8 @@ $env:ALIYUN_OSS_ACCESS_KEY_SECRET="..."
 `CDN_BASE_URL` 指向 CDN 域名。如果 CDN 回源到 OSS bucket 根路径，保持 `https://cdn.example.com`；如果 CDN 只回源某个目录，写成 `https://cdn.example.com/path-prefix`。
 
 `LFS_META_DB_DSN` 用来写 Gitea 的 `lfs_meta_object` 表。verify 成功后网关会 upsert 元数据，download 时会读取元数据做 size 校验。为空时网关仍能工作，但 Gitea 页面里的 LFS 统计和历史元数据不会更新。PostgreSQL 用户需要有 `SELECT/INSERT/UPDATE` `lfs_meta_object` 的权限；直接复用 Gitea 数据库用户最简单。
+
+启用 `RELEASE_DIRECT_UPLOAD` 时，`LFS_META_DB_DSN` 也是必需项。网关会在 OSS finalize 后写入 Gitea `attachment` 表中的临时附件元数据；Gitea Release 表单提交时再按原生流程绑定 UUID。网页扩展已验证并固定于 Gitea 1.26.2，升级 Gitea 前必须重新验收 Dropzone 上传流程。
 
 `OSS_KEY_STYLE` 有两个值：
 

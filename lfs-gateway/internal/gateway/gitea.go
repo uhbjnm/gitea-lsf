@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"time"
 )
 
@@ -16,6 +18,8 @@ var (
 	errForbidden    = errors.New("forbidden")
 	errNotFound     = errors.New("not found")
 )
+
+var signedInUserPattern = regexp.MustCompile(`(?s)<div class="menu user-menu">.*?<div class="header">.*?<strong>([A-Za-z0-9_.-]+)</strong>`)
 
 type GiteaClient struct {
 	apiURL string
@@ -50,6 +54,14 @@ func NewGiteaClient(apiURL, webURL string) *GiteaClient {
 }
 
 func (c *GiteaClient) GetRepo(ctx context.Context, auth, owner, repo string) (repoInfo, error) {
+	headers := make(http.Header)
+	if auth != "" {
+		headers.Set("Authorization", auth)
+	}
+	return c.GetRepoWithHeaders(ctx, headers, owner, repo)
+}
+
+func (c *GiteaClient) GetRepoWithHeaders(ctx context.Context, headers http.Header, owner, repo string) (repoInfo, error) {
 	endpoint := fmt.Sprintf(
 		"%s/repos/%s/%s",
 		c.apiURL,
@@ -62,9 +74,7 @@ func (c *GiteaClient) GetRepo(ctx context.Context, auth, owner, repo string) (re
 		return repoInfo{}, err
 	}
 	req.Header.Set("Accept", "application/json")
-	if auth != "" {
-		req.Header.Set("Authorization", auth)
-	}
+	copyForwardHeaders(req.Header, headers)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -94,9 +104,49 @@ func (c *GiteaClient) GetRepo(ctx context.Context, auth, owner, repo string) (re
 	}
 }
 
+func (c *GiteaClient) CheckReleaseWriter(ctx context.Context, headers http.Header, owner, repo string) (string, error) {
+	path := fmt.Sprintf("/%s/%s/releases/new", url.PathEscape(owner), url.PathEscape(repo))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.webURL+path, nil)
+	if err != nil {
+		return "", err
+	}
+	copyForwardHeaders(req.Header, headers)
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+		if err != nil {
+			return "", err
+		}
+		match := signedInUserPattern.FindSubmatch(body)
+		if len(match) != 2 {
+			return "", errors.New("gitea release page missing signed-in user")
+		}
+		return html.UnescapeString(string(match[1])), nil
+	case http.StatusUnauthorized:
+		return "", errUnauthorized
+	case http.StatusForbidden:
+		return "", errForbidden
+	case http.StatusNotFound:
+		return "", errNotFound
+	case http.StatusFound, http.StatusSeeOther:
+		return "", errUnauthorized
+	default:
+		return "", fmt.Errorf("gitea release authorization: %s", resp.Status)
+	}
+}
+
 func (c *GiteaClient) GetMedia(ctx context.Context, headers http.Header, path string) (*mediaResponse, error) {
+	return c.GetWeb(ctx, http.MethodGet, headers, path)
+}
+
+func (c *GiteaClient) GetWeb(ctx context.Context, method string, headers http.Header, path string) (*mediaResponse, error) {
 	endpoint := c.webURL + path
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}

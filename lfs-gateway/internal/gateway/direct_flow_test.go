@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -38,6 +39,28 @@ func (s *directObjectStore) PresignPut(_ context.Context, key string, _ time.Dur
 
 func (s *directObjectStore) PresignGet(_ context.Context, key string, _ time.Duration) (string, map[string]string, error) {
 	return s.baseURL + "/oss/" + key, nil, nil
+}
+
+func (s *directObjectStore) Copy(_ context.Context, sourceKey, destinationKey string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	data, ok := s.data[sourceKey]
+	if !ok {
+		return errors.New("source object not found")
+	}
+	s.data[destinationKey] = append([]byte(nil), data...)
+	return nil
+}
+
+func (s *directObjectStore) Delete(_ context.Context, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.data, key)
+	return nil
+}
+
+func (s *directObjectStore) EnsureDownloadName(_ context.Context, _ string, _ string) error {
+	return nil
 }
 
 type directDownloadSigner struct {

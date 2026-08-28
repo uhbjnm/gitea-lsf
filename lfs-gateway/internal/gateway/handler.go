@@ -15,31 +15,36 @@ import (
 )
 
 var oidPattern = regexp.MustCompile(`\A[0-9a-f]{64}\z`)
+var uuidPattern = regexp.MustCompile(`\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z`)
 
 type repoClient interface {
 	GetRepo(ctx context.Context, auth, owner, repo string) (repoInfo, error)
+	CheckReleaseWriter(ctx context.Context, headers http.Header, owner, repo string) (string, error)
 	GetMedia(ctx context.Context, headers http.Header, path string) (*mediaResponse, error)
+	GetWeb(ctx context.Context, method string, headers http.Header, path string) (*mediaResponse, error)
 }
 
 type Handler struct {
-	cfg       Config
-	repos     repoClient
-	store     ObjectStore
-	downloads DownloadSigner
-	metas     MetaStore
-	tokens    *VerifyTokens
-	mux       *http.ServeMux
+	cfg           Config
+	repos         repoClient
+	store         ObjectStore
+	downloads     DownloadSigner
+	metas         MetaStore
+	tokens        *VerifyTokens
+	releaseTokens *ReleaseUploadTokens
+	mux           *http.ServeMux
 }
 
 func NewHandler(cfg Config, repos repoClient, store ObjectStore, downloads DownloadSigner, metas MetaStore, tokens *VerifyTokens) http.Handler {
 	h := &Handler{
-		cfg:       cfg,
-		repos:     repos,
-		store:     store,
-		downloads: downloads,
-		metas:     metas,
-		tokens:    tokens,
-		mux:       http.NewServeMux(),
+		cfg:           cfg,
+		repos:         repos,
+		store:         store,
+		downloads:     downloads,
+		metas:         metas,
+		tokens:        tokens,
+		releaseTokens: NewReleaseUploadTokens(cfg.VerifySecret),
+		mux:           http.NewServeMux(),
 	}
 	h.mux.HandleFunc("/", h.serve)
 	return h
@@ -70,9 +75,148 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 		h.handleLocksVerify(w, r, route)
 	case route.Kind == "media" && r.Method == http.MethodGet:
 		h.handleMedia(w, r, route)
+	case route.Kind == "releaseUpload" && r.Method == http.MethodPost:
+		h.handleReleaseUpload(w, r, route)
+	case route.Kind == "releaseUploadComplete" && r.Method == http.MethodPost:
+		h.handleReleaseUploadComplete(w, r, route)
+	case route.Kind == "releaseDownload" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
+		h.handleReleaseDownload(w, r, route)
 	default:
 		writeError(w, http.StatusNotFound, "not found")
 	}
+}
+
+func (h *Handler) handleReleaseUpload(w http.ResponseWriter, r *http.Request, route route) {
+	if !h.cfg.ReleaseDirectUpload {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if !isJSONRequest(r) {
+		writeAPIError(w, http.StatusUnsupportedMediaType, "application/json is required")
+		return
+	}
+	repoID, uploaderID, ok := h.authorizeReleaseWriter(w, r, route)
+	if !ok {
+		return
+	}
+
+	var req releaseUploadRequest
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	name := sanitizeFilename(req.Name)
+	if name == "" || name != req.Name || len([]rune(name)) > 255 {
+		writeAPIError(w, http.StatusUnprocessableEntity, "invalid file name")
+		return
+	}
+	if req.Size < 0 || req.Size > h.cfg.ReleaseMaxFileSize {
+		writeAPIError(w, http.StatusRequestEntityTooLarge, "file size exceeds release limit")
+		return
+	}
+
+	uuid, err := newUUID()
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "generate upload id failed")
+		return
+	}
+	expiresAt := time.Now().UTC().Add(h.cfg.SignExpires).Truncate(time.Second)
+	claims := releaseUploadClaims{
+		RepoID: repoID, UploaderID: uploaderID, UUID: uuid, Name: name, Size: req.Size, ExpiresAt: expiresAt.Unix(),
+	}
+	token, err := h.releaseTokens.Sign(claims)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "sign upload token failed")
+		return
+	}
+	href, headers, err := h.store.PresignPut(r.Context(), releasePendingKey(h.cfg.ReleasePendingPrefix, repoID, uuid), h.cfg.SignExpires)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "sign upload failed")
+		return
+	}
+
+	writeAPIJSON(w, http.StatusOK, releaseUploadResponse{
+		Upload: lfsLink{
+			Href: href, Header: headers, ExpiresAt: expiresAt, ExpiresIn: int64(h.cfg.SignExpires.Seconds()),
+		},
+		CompleteURL: releaseCompleteURL(route),
+		Token:       token,
+		ExpiresAt:   expiresAt,
+	})
+}
+
+func (h *Handler) handleReleaseUploadComplete(w http.ResponseWriter, r *http.Request, route route) {
+	if !h.cfg.ReleaseDirectUpload {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if !isJSONRequest(r) {
+		writeAPIError(w, http.StatusUnsupportedMediaType, "application/json is required")
+		return
+	}
+	repoID, uploaderID, ok := h.authorizeReleaseWriter(w, r, route)
+	if !ok {
+		return
+	}
+
+	var req releaseUploadCompleteRequest
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	claims, valid := h.releaseTokens.Verify(req.Token, time.Now())
+	if !valid || claims.RepoID != repoID || claims.UploaderID != uploaderID {
+		writeAPIError(w, http.StatusUnauthorized, "invalid upload token")
+		return
+	}
+
+	pendingKey := releasePendingKey(h.cfg.ReleasePendingPrefix, repoID, claims.UUID)
+	finalKey := releaseAttachmentKey(h.cfg.ReleaseAttachmentPrefix, claims.UUID)
+	pendingMeta, pendingExists, err := h.store.Stat(r.Context(), pendingKey)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "stat uploaded object failed")
+		return
+	}
+	if !pendingExists || pendingMeta.Size != claims.Size {
+		writeAPIError(w, http.StatusUnprocessableEntity, "uploaded object size mismatch")
+		return
+	}
+
+	if finalMeta, finalExists, err := h.store.Stat(r.Context(), finalKey); err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "stat release object failed")
+		return
+	} else if finalExists {
+		if finalMeta.Size != claims.Size {
+			writeAPIError(w, http.StatusConflict, "release object already exists")
+			return
+		}
+	} else {
+		if err := h.store.Copy(r.Context(), pendingKey, finalKey); err != nil {
+			if meta, exists, statErr := h.store.Stat(r.Context(), finalKey); statErr != nil || !exists || meta.Size != claims.Size {
+				writeAPIError(w, http.StatusInternalServerError, "finalize release object failed")
+				return
+			}
+		}
+	}
+	if err := h.store.EnsureDownloadName(r.Context(), finalKey, claims.Name); err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "set release download name failed")
+		return
+	}
+
+	attachment := releaseAttachment{
+		UUID: claims.UUID, RepoID: claims.RepoID, UploaderID: claims.UploaderID,
+		Name: claims.Name, Size: claims.Size, CreatedAt: time.Now().UTC(),
+	}
+	if err := h.metas.EnsureAttachment(r.Context(), attachment); err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "save release attachment failed")
+		return
+	}
+	_ = h.store.Delete(r.Context(), pendingKey)
+	writeAPIJSON(w, http.StatusOK, map[string]string{"uuid": claims.UUID})
 }
 
 func (h *Handler) handleBatch(w http.ResponseWriter, r *http.Request, route route) {
@@ -291,6 +435,45 @@ func (h *Handler) handleMedia(w http.ResponseWriter, r *http.Request, route rout
 	http.Redirect(w, r, href, http.StatusFound)
 }
 
+func (h *Handler) handleReleaseDownload(w http.ResponseWriter, r *http.Request, route route) {
+	response, err := h.repos.GetWeb(r.Context(), r.Method, r.Header, r.URL.RequestURI())
+	if err != nil {
+		writeAPIError(w, http.StatusBadGateway, "gitea release lookup failed")
+		return
+	}
+	defer response.Close()
+	if response.Redirect == nil {
+		copyHTTPHeaders(w.Header(), response.Header)
+		w.WriteHeader(response.StatusCode)
+		if r.Method != http.MethodHead && response.Body != nil {
+			_, _ = io.Copy(w, response.Body)
+		}
+		return
+	}
+
+	key, ok := h.objectKeyFromGiteaReleaseRedirect(response.Redirect)
+	if !ok {
+		copyHTTPHeaders(w.Header(), response.Header)
+		w.WriteHeader(response.StatusCode)
+		return
+	}
+	filename := filenameFromMediaPath(route.Path)
+	if err := h.store.EnsureDownloadName(r.Context(), key, filename); err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "set release download name failed")
+		return
+	}
+	href, _, err := h.downloads.SignDownload(
+		r.Context(), key, h.cfg.SignExpires,
+		time.Now().UTC().Add(h.cfg.SignExpires).Truncate(time.Second),
+	)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "sign release download failed")
+		return
+	}
+	w.Header().Set("Cache-Control", "private, no-store")
+	http.Redirect(w, r, href, http.StatusFound)
+}
+
 func (h *Handler) objectKeyFromGiteaMediaRedirect(redirectURL *url.URL) (string, bool) {
 	pathKey := strings.TrimLeft(redirectURL.EscapedPath(), "/")
 	if strings.HasPrefix(redirectURL.Host, h.cfg.OSSBucket+".") {
@@ -305,6 +488,48 @@ func (h *Handler) objectKeyFromGiteaMediaRedirect(redirectURL *url.URL) (string,
 		}
 	}
 	return "", false
+}
+
+func (h *Handler) objectKeyFromGiteaReleaseRedirect(redirectURL *url.URL) (string, bool) {
+	pathKey := strings.TrimLeft(redirectURL.EscapedPath(), "/")
+	endpointHost := ossEndpointHost(h.cfg.OSSEndpoint)
+	redirectHost := strings.ToLower(redirectURL.Hostname())
+	allowedEndpointHosts := []string{endpointHost, "s3." + endpointHost}
+	pathStyle := false
+	virtualHosted := false
+	for _, host := range allowedEndpointHosts {
+		pathStyle = pathStyle || redirectHost == host
+		virtualHosted = virtualHosted || redirectHost == strings.ToLower(h.cfg.OSSBucket+"."+host)
+	}
+	if endpointHost == "" || (!pathStyle && !virtualHosted) {
+		return "", false
+	}
+	if virtualHosted {
+		if key, err := url.PathUnescape(pathKey); err == nil && validReleaseAttachmentKey(h.cfg.ReleaseAttachmentPrefix, key) {
+			return key, true
+		}
+	}
+	if strings.HasPrefix(pathKey, h.cfg.OSSBucket+"/") {
+		key, err := url.PathUnescape(strings.TrimPrefix(pathKey, h.cfg.OSSBucket+"/"))
+		if err == nil && validReleaseAttachmentKey(h.cfg.ReleaseAttachmentPrefix, key) {
+			return key, true
+		}
+	}
+	return "", false
+}
+
+func ossEndpointHost(endpoint string) string {
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return ""
+	}
+	if parsed.Hostname() == "" {
+		parsed, err = url.Parse("//" + endpoint)
+		if err != nil {
+			return ""
+		}
+	}
+	return strings.ToLower(parsed.Hostname())
 }
 
 func filenameFromMediaPath(mediaPath string) string {
@@ -370,9 +595,56 @@ func (h *Handler) authorize(w http.ResponseWriter, r *http.Request, route route,
 	return repo, true
 }
 
+func (h *Handler) authorizeReleaseWriter(w http.ResponseWriter, r *http.Request, route route) (int64, int64, bool) {
+	username, err := h.repos.CheckReleaseWriter(r.Context(), r.Header, route.Owner, route.Repo)
+	if err != nil {
+		writeReleaseAuthorizationError(w, err)
+		return 0, 0, false
+	}
+	repoID, uploaderID, err := h.metas.ResolveReleaseUpload(r.Context(), route.Owner, route.Repo, username)
+	if err != nil {
+		writeReleaseAuthorizationError(w, err)
+		return 0, 0, false
+	}
+	return repoID, uploaderID, true
+}
+
+func writeReleaseAuthorizationError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errUnauthorized):
+		writeAPIError(w, http.StatusUnauthorized, "authentication required")
+	case errors.Is(err, errForbidden):
+		writeAPIError(w, http.StatusForbidden, "release write permission required")
+	case errors.Is(err, errNotFound):
+		writeAPIError(w, http.StatusNotFound, "repository not found")
+	default:
+		writeAPIError(w, http.StatusBadGateway, "gitea authorization failed")
+	}
+}
+
 func parseRoute(rawPath string) (route, bool) {
 	parts := strings.Split(strings.Trim(rawPath, "/"), "/")
 	if len(parts) < 5 {
+		return route{}, false
+	}
+	if parts[2] == "releases" {
+		owner, err := url.PathUnescape(parts[0])
+		if err != nil {
+			return route{}, false
+		}
+		repo, err := url.PathUnescape(parts[1])
+		if err != nil || owner == "" || repo == "" {
+			return route{}, false
+		}
+		if len(parts) == 5 && parts[3] == "attachments" && parts[4] == "direct" {
+			return route{Owner: owner, Repo: repo, Kind: "releaseUpload"}, true
+		}
+		if len(parts) == 6 && parts[3] == "attachments" && parts[4] == "direct" && parts[5] == "complete" {
+			return route{Owner: owner, Repo: repo, Kind: "releaseUploadComplete"}, true
+		}
+		if len(parts) >= 6 && parts[3] == "download" {
+			return route{Owner: owner, Repo: repo, Kind: "releaseDownload", Path: strings.Join(parts[2:], "/")}, true
+		}
 		return route{}, false
 	}
 	if len(parts) >= 5 && parts[2] == "media" {
@@ -426,6 +698,35 @@ func parseRoute(rawPath string) (route, bool) {
 		return route{Owner: owner, Repo: repo, Kind: "verify", OID: oid}, true
 	}
 	return route{}, false
+}
+
+func releasePendingKey(prefix string, repoID int64, uuid string) string {
+	return strings.Join([]string{prefix, "repositories", strconv.FormatInt(repoID, 10), uuid}, "/")
+}
+
+func releaseAttachmentKey(prefix, uuid string) string {
+	return strings.Join([]string{prefix, uuid[0:1], uuid[1:2], uuid}, "/")
+}
+
+func validReleaseAttachmentKey(prefix, key string) bool {
+	prefix = strings.Trim(prefix, "/")
+	if !strings.HasPrefix(key, prefix+"/") {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(key, prefix+"/"), "/")
+	if len(parts) != 3 || len(parts[0]) != 1 || len(parts[1]) != 1 || !uuidPattern.MatchString(parts[2]) {
+		return false
+	}
+	return parts[0] == parts[2][0:1] && parts[1] == parts[2][1:2]
+}
+
+func releaseCompleteURL(route route) string {
+	return fmt.Sprintf("/%s/%s/releases/attachments/direct/complete", url.PathEscape(route.Owner), url.PathEscape(route.Repo))
+}
+
+func isJSONRequest(r *http.Request) bool {
+	contentType := strings.ToLower(strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"), ";")[0]))
+	return contentType == "application/json"
 }
 
 func (h *Handler) verifyURL(route route, oid string) string {
@@ -525,6 +826,16 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, lfsError{Message: message})
+}
+
+func writeAPIJSON(w http.ResponseWriter, status int, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+func writeAPIError(w http.ResponseWriter, status int, message string) {
+	writeAPIJSON(w, status, map[string]string{"message": message})
 }
 
 func setLFSAuthenticate(w http.ResponseWriter) {

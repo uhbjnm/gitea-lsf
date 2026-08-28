@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aliyun/aliyun-oss-go-sdk/oss"
@@ -15,6 +17,9 @@ type ObjectStore interface {
 	Stat(ctx context.Context, key string) (objectMeta, bool, error)
 	PresignPut(ctx context.Context, key string, expires time.Duration) (string, map[string]string, error)
 	PresignGet(ctx context.Context, key string, expires time.Duration) (string, map[string]string, error)
+	Copy(ctx context.Context, sourceKey, destinationKey string) error
+	Delete(ctx context.Context, key string) error
+	EnsureDownloadName(ctx context.Context, key, filename string) error
 }
 
 type OSSStore struct {
@@ -73,6 +78,46 @@ func (s *OSSStore) PresignGet(_ context.Context, key string, expires time.Durati
 		return "", nil, err
 	}
 	return href, nil, nil
+}
+
+func (s *OSSStore) Copy(_ context.Context, sourceKey, destinationKey string) error {
+	_, err := s.bucket.CopyObject(sourceKey, destinationKey, oss.ForbidOverWrite(true))
+	return err
+}
+
+func (s *OSSStore) Delete(_ context.Context, key string) error {
+	return s.bucket.DeleteObject(key)
+}
+
+func (s *OSSStore) EnsureDownloadName(_ context.Context, key, filename string) error {
+	disposition := attachmentContentDisposition(filename)
+	header, err := s.bucket.GetObjectDetailedMeta(key)
+	if err != nil {
+		return err
+	}
+	if header.Get("Content-Disposition") == disposition {
+		return nil
+	}
+	return s.bucket.SetObjectMeta(key, oss.ContentDisposition(disposition))
+}
+
+func attachmentContentDisposition(filename string) string {
+	var fallback strings.Builder
+	for _, char := range filename {
+		if char >= 0x20 && char <= 0x7e {
+			fallback.WriteRune(char)
+		} else {
+			fallback.WriteByte('_')
+		}
+	}
+	if fallback.Len() == 0 {
+		fallback.WriteString("download")
+	}
+	return fmt.Sprintf(
+		`attachment; filename="%s"; filename*=UTF-8''%s`,
+		fallback.String(),
+		url.PathEscape(filename),
+	)
 }
 
 func parseContentLength(header http.Header) (int64, error) {

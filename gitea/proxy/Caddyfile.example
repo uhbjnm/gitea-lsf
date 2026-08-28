@@ -2,5 +2,11 @@ git.example.com {
     @lfs path_regexp lfs ^/[^/]+/[^/]+(\.git)?/info/lfs/.*
     reverse_proxy @lfs lfs-gateway:8080
 
+    @release_direct_upload path_regexp release_direct_upload ^/[^/]+/[^/]+/releases/attachments/direct(?:/complete)?$
+    reverse_proxy @release_direct_upload lfs-gateway:8080
+
+    @release_download path_regexp release_download ^/[^/]+/[^/]+/releases/download/.*
+    reverse_proxy @release_download lfs-gateway:8080
+
     reverse_proxy gitea:3000
 }

@@ -5,6 +5,8 @@
 - `git push`：Git LFS 客户端向网关请求上传动作，网关返回 OSS `PUT` 预签名 URL，文件直传 OSS；上传签名带 `x-oss-forbid-overwrite: true`，避免覆盖已有对象。
 - `git pull`：Git LFS 客户端向网关请求下载动作，网关返回 CDN 鉴权 URL，文件直连 CDN 下载。
 - Gitea Web 下载：页面里的 LFS 下载 `/media/...` 由网关改写到带原始文件名的 CDN 鉴权 URL。
+- Release 上传：Gitea 网页中的 Release 文件通过 OSS 预签名 URL 直传，不经过 Gitea/Gateway 数据面。
+- Release 下载：Gitea 完成权限校验后，由网关改写到带原始文件名的 CDN 鉴权 URL。
 - 权限校验：网关把客户端的 `Authorization` 或浏览器 `Cookie` 转发给 Gitea，使用 Gitea 仓库权限决定是否允许上传或下载。
 - 元数据同步：verify 成功后写入 Gitea PostgreSQL 的 `lfs_meta_object` 表，避免 Gitea LFS 元数据缺失。
 
@@ -151,3 +153,52 @@ GIT_TRACE=1 GIT_CURL_VERBOSE=1 git lfs pull
 - `git lfs pull` 的 LFS 对象下载目标是 CDN 域名，并带 `auth_key`。
 - Gitea Web 页面显示 LFS 文件真实大小和 `LFS` 标签。
 - Gitea Web 下载 `/media/.../filename` 跳转到 CDN，且 CDN URL 末尾保留原始文件名。
+
+## Release 直传 OSS
+
+Release 页面使用 Gitea 原生临时附件 UUID 流程，但由自定义 Dropzone 传输层完成两阶段上传：
+
+1. 浏览器向网关申请 OSS 预签名 `PUT` URL。
+2. 浏览器把文件直接上传到 `RELEASE_PENDING_OSS_PREFIX`。
+3. 网关校验 OSS 对象大小，在 OSS 内部复制到 `RELEASE_ATTACHMENT_OSS_PREFIX`。
+4. 网关写入未绑定的 Gitea `attachment` 元数据并向页面返回 UUID。
+5. 用户提交 Release 表单后，Gitea 原生逻辑把 UUID 绑定到 Release。
+
+该实现已固定并验证 `Gitea 1.26.2`。升级 Gitea 前必须重新验证 Release 页面上传组件。
+
+`GITEA_ATTACHMENT_OSS_ENDPOINT` 必须使用阿里云 S3 兼容端点（例如 `s3.oss-cn-hangzhou.aliyuncs.com`），不能使用 OSS 原生端点 `oss-cn-hangzhou.aliyuncs.com`。
+
+Gitea 1.26.2 使用的 MinIO SDK 实际读取 `MINIO_ACCESS_KEY/MINIO_SECRET_KEY`。Compose 已将宿主机的 `ALIYUN_OSS_ACCESS_KEY_ID/ALIYUN_OSS_ACCESS_KEY_SECRET` 映射为这两个变量，避免把凭据写入 `app.ini`。
+
+### OSS CORS
+
+Release 直传需要在 OSS bucket 配置：
+
+```text
+AllowedOrigin: https://git.example.com
+AllowedMethod: PUT
+AllowedHeader: Content-Type, x-oss-forbid-overwrite
+ExposeHeader: ETag
+```
+
+同时为 `RELEASE_PENDING_OSS_PREFIX` 配置生命周期规则，建议 1 天后自动删除，清理关闭页面或上传中断留下的 pending 对象。
+
+### 历史附件迁移
+
+切换 Gitea `[attachment]` 到 OSS 前先备份 PostgreSQL 和本地附件目录，然后在旧的本地 attachment 配置仍生效时执行：
+
+```bash
+sh lfs-gateway/scripts/migrate-release-attachments.sh
+```
+
+该命令会复制所有 Release、Issue 和 PR 附件，不删除本地源文件。确认历史附件能从 OSS 下载后，再启用 Compose 中的 `GITEA__attachment__STORAGE_TYPE=minio` 配置。
+
+### Release CDN 文件名
+
+Gateway 在 OSS finalize 时给正式对象写入标准 `Content-Disposition`，然后使用真实 attachment key 生成 CDN URL：
+
+```text
+/gitea/attachments/a/b/{uuid}?auth_key=...
+```
+
+因此 Release 下载不需要额外的 CDN Path 重写，浏览器从响应头获得原文件名。历史迁移对象没有该元数据时，Gateway 会在首次下载前自动补齐。

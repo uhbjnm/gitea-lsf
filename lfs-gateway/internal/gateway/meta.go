@@ -13,6 +13,8 @@ import (
 type MetaStore interface {
 	Get(ctx context.Context, repoID int64, oid string) (objectMeta, bool, error)
 	Upsert(ctx context.Context, repoID int64, obj objectRequest) error
+	ResolveReleaseUpload(ctx context.Context, owner, repo, username string) (int64, int64, error)
+	EnsureAttachment(ctx context.Context, attachment releaseAttachment) error
 }
 
 type noopMetaStore struct{}
@@ -23,6 +25,14 @@ func (noopMetaStore) Get(context.Context, int64, string) (objectMeta, bool, erro
 
 func (noopMetaStore) Upsert(context.Context, int64, objectRequest) error {
 	return nil
+}
+
+func (noopMetaStore) EnsureAttachment(context.Context, releaseAttachment) error {
+	return errors.New("release attachment metadata store is disabled")
+}
+
+func (noopMetaStore) ResolveReleaseUpload(context.Context, string, string, string) (int64, int64, error) {
+	return 0, 0, errors.New("release attachment metadata store is disabled")
 }
 
 type PostgresMetaStore struct {
@@ -84,4 +94,74 @@ func (s *PostgresMetaStore) Upsert(ctx context.Context, repoID int64, obj object
 		return fmt.Errorf("upsert lfs_meta_object: %w", err)
 	}
 	return nil
+}
+
+func (s *PostgresMetaStore) EnsureAttachment(ctx context.Context, attachment releaseAttachment) error {
+	createdUnix := attachment.CreatedAt.Unix()
+	if createdUnix <= 0 {
+		createdUnix = time.Now().Unix()
+	}
+	_, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO attachment
+		 (uuid, repo_id, issue_id, release_id, uploader_id, comment_id, name, download_count, size, created_unix)
+		 VALUES ($1, $2, 0, 0, $3, 0, $4, 0, $5, $6)
+		 ON CONFLICT (uuid) DO NOTHING`,
+		attachment.UUID,
+		attachment.RepoID,
+		attachment.UploaderID,
+		attachment.Name,
+		attachment.Size,
+		createdUnix,
+	)
+	if err != nil {
+		return fmt.Errorf("insert release attachment: %w", err)
+	}
+
+	var stored releaseAttachment
+	err = s.db.QueryRowContext(
+		ctx,
+		`SELECT uuid, repo_id, uploader_id, name, size, created_unix
+		 FROM attachment WHERE uuid = $1`,
+		attachment.UUID,
+	).Scan(
+		&stored.UUID,
+		&stored.RepoID,
+		&stored.UploaderID,
+		&stored.Name,
+		&stored.Size,
+		&createdUnix,
+	)
+	if err != nil {
+		return fmt.Errorf("load release attachment: %w", err)
+	}
+	if stored.UUID != attachment.UUID || stored.RepoID != attachment.RepoID ||
+		stored.UploaderID != attachment.UploaderID || stored.Name != attachment.Name || stored.Size != attachment.Size {
+		return errors.New("release attachment UUID already belongs to different metadata")
+	}
+	return nil
+}
+
+func (s *PostgresMetaStore) ResolveReleaseUpload(ctx context.Context, owner, repo, username string) (int64, int64, error) {
+	var repoID, uploaderID int64
+	err := s.db.QueryRowContext(
+		ctx,
+		`SELECT repository.id, uploader.id
+		 FROM repository
+		 JOIN "user" owner ON owner.id = repository.owner_id
+		 CROSS JOIN "user" uploader
+		 WHERE lower(owner.name) = lower($1)
+		   AND lower(repository.name) = lower($2)
+		   AND lower(uploader.name) = lower($3)`,
+		owner,
+		repo,
+		username,
+	).Scan(&repoID, &uploaderID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, 0, errNotFound
+	}
+	if err != nil {
+		return 0, 0, fmt.Errorf("resolve release upload identities: %w", err)
+	}
+	return repoID, uploaderID, nil
 }
