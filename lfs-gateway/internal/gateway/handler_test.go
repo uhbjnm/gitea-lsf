@@ -441,6 +441,25 @@ func TestReleaseUploadRejectsNonWriter(t *testing.T) {
 	}
 }
 
+func TestReleaseUploadProbeReportsEnabled(t *testing.T) {
+	cfg := testConfig()
+	cfg.ReleaseDirectUpload = true
+	handler := NewHandler(
+		cfg,
+		fakeRepoClient{},
+		fakeStore{objects: map[string]objectMeta{}},
+		NewDownloadSigner(cfg, fakeStore{objects: map[string]objectMeta{}}),
+		fakeMetaStore{objects: map[string]objectMeta{}},
+		NewVerifyTokens(cfg.VerifySecret),
+	)
+	req := httptest.NewRequest(http.MethodGet, "/acme/demo/releases/attachments/direct", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"enabled":true`) {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestReleaseUploadCompleteRejectsSizeMismatch(t *testing.T) {
 	cfg := testConfig()
 	cfg.ReleaseDirectUpload = true

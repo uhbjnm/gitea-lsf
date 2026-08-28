@@ -76,12 +76,21 @@
     }
   };
 
-  const patchDropzone = () => {
+  const patchDropzone = async () => {
     const dropzone = dropzoneElement.dropzone;
     if (!dropzone) {
       if (++attempts < 200) setTimeout(patchDropzone, 50);
       return;
     }
+
+    try {
+      const response = await fetch(uploadURL, {credentials: 'same-origin'});
+      const status = await response.json();
+      if (!response.ok || status.enabled !== true) return;
+    } catch {
+      return;
+    }
+
     if (typeof dropzone._finished !== 'function' || typeof dropzone._errorProcessing !== 'function') {
       console.error('Release direct upload is incompatible with this Gitea Dropzone version');
       return;

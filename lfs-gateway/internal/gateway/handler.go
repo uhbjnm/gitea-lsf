@@ -77,6 +77,12 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 		h.handleMedia(w, r, route)
 	case route.Kind == "releaseUpload" && r.Method == http.MethodPost:
 		h.handleReleaseUpload(w, r, route)
+	case route.Kind == "releaseUpload" && r.Method == http.MethodGet:
+		if !h.cfg.ReleaseDirectUpload {
+			writeAPIError(w, http.StatusNotFound, "not found")
+			return
+		}
+		writeAPIJSON(w, http.StatusOK, map[string]bool{"enabled": true})
 	case route.Kind == "releaseUploadComplete" && r.Method == http.MethodPost:
 		h.handleReleaseUploadComplete(w, r, route)
 	case route.Kind == "releaseDownload" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
