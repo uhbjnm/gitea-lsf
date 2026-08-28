@@ -80,7 +80,7 @@ def parse_args():
     parser.add_argument("--owner", required=True)
     parser.add_argument("--repo", required=True)
     parser.add_argument("--tag", required=True)
-    parser.add_argument("--target", default="main")
+    parser.add_argument("--target", help="target branch or commit; defaults to the repository default branch")
     parser.add_argument("--title")
     parser.add_argument("--notes", default="")
     parser.add_argument("--notes-file", type=pathlib.Path)
@@ -113,6 +113,9 @@ def main():
     permissions = repository.get("permissions") or {}
     if not (permissions.get("push") or permissions.get("admin")):
         raise RuntimeError("GITEA_TOKEN does not have write permission for the repository")
+    target = args.target or repository.get("default_branch")
+    if not target:
+        raise RuntimeError("repository response did not contain a default branch")
 
     release = api_request(
         base_url,
@@ -121,7 +124,7 @@ def main():
         f"{api_base}/releases",
         {
             "tag_name": args.tag,
-            "target_commitish": args.target,
+            "target_commitish": target,
             "name": title,
             "body": notes,
             "draft": True,
